@@ -1,0 +1,283 @@
+name: Build iStoreOS
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [istoreos]
+
+env:
+  ISTOREOS_REPO: https://github.com/istoreos/istoreos.git
+  ISTOREOS_BRANCH: istoreos-24.10
+
+jobs:
+  build:
+    name: Build ${{ matrix.model }}-istoreos-24.10
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        model:
+          - nanopi-r4s
+          - nanopi-r5s
+          - x86_64
+
+    steps:
+    - name: Setup variables
+      run: |
+        sudo timedatectl set-timezone 'Asia/Shanghai'
+        git config --global user.name 'actions'
+        git config --global user.email 'action@github.com'
+        echo build_dir="/builder" >> "$GITHUB_ENV"
+        echo istoreos_branch="${ISTOREOS_BRANCH}" >> "$GITHUB_ENV"
+        if [[ "${{ matrix.model }}" == nanopi-* ]]; then
+          echo ccache_model=nanopi-r5s >> "$GITHUB_ENV"
+        else
+          echo ccache_model=${{ matrix.model }} >> "$GITHUB_ENV"
+        fi
+
+    - name: Show system
+      run: |
+        echo -e "\n\e[1;32mCPU:\e[0m"
+        echo "$(grep 'model name' /proc/cpuinfo | head -1 | awk -F ': ' '{print $2}') ($(grep 'cpu MHz' /proc/cpuinfo | head -1 | awk -F ': ' '{print $2}')MHz) x $(grep processor /proc/cpuinfo  | wc -l)"
+        echo -e "\n\e[1;32mMemory:\e[0m"
+        free -h
+        echo -e "\n\e[1;32mStorage:\e[0m"
+        df -Th / /mnt
+        echo -e "\n\e[1;32mSystem:\e[0m"
+        lsb_release -a
+        echo -e "\n\e[1;32mKernel:\e[0m"
+        uname -a
+        echo
+
+    - name: Free disk space
+      uses: sbwml/actions@free-disk
+      with:
+        build-mount-path: /builder
+
+    - name: Build System Setup
+      uses: sbwml/actions@openwrt-build-setup
+
+    - name: Install LLVM
+      uses: sbwml/actions@install-llvm
+
+    - name: Restore Cached
+      uses: actions/cache/restore@v5
+      with:
+        path: /builder/.ccache
+        key: ${{ env.istoreos_branch }}-${{ env.ccache_model }}
+
+    - name: Compile iStoreOS
+      id: compile
+      continue-on-error: true
+      working-directory: /builder
+      env:
+        git_name: private
+        git_password: ${{ secrets.ftp_password }}
+        private_url: ${{ secrets.private_url }}
+      run: |
+        export KERNEL_CLANG_LTO=y ENABLE_CCACHE=y ENABLE_OTA=y ENABLE_BPF=y ENABLE_LTO=y ENABLE_LRNG=y USE_GCC16=y ENABLE_MOLD=y ENABLE_ISTORE=y
+        export branch="${ISTOREOS_BRANCH}" version=rc2 mirror=https://init.cooluc.com github=github.com gitea=git.cooluc.com code_mirror=github.com
+        export CURRENT_DATE=$(date +%s)
+        export LAN=${LAN:-10.0.0.1}
+        cores=$(($(nproc) + 1))
+
+        case "${{ matrix.model }}" in
+          nanopi-r4s)
+            platform="rk3399"
+            toolchain_arch="aarch64_generic"
+            model="nanopi-r4s"
+            ;;
+          nanopi-r5s)
+            platform="rk3568"
+            toolchain_arch="aarch64_generic"
+            model="nanopi-r5s"
+            ;;
+          x86_64)
+            platform="x86_64"
+            toolchain_arch="x86_64"
+            model="x86_64"
+            ;;
+        esac
+        export platform toolchain_arch model
+
+        echo -e "\n\e[1;32mBuilding iStoreOS ${ISTOREOS_BRANCH}\e[0m"
+        echo -e "\e[1;32mModel: $model\e[0m"
+        echo -e "\e[1;32mFeatures: OTA BPF LTO LRNG Mold GCC16 Clang-LTO iStore\e[0m\n"
+
+        rm -rf openwrt
+        git clone --depth=1 "$ISTOREOS_REPO" -b "$ISTOREOS_BRANCH" openwrt
+        cd openwrt
+        echo "$ISTOREOS_BRANCH" > version.txt
+
+        curl -fsSLO "$mirror/openwrt/patch/key2.tar.gz"
+        tar zxf key2.tar.gz
+        rm -f key2.tar.gz
+
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+        scripts=(
+          00-prepare_base.sh
+          01-prepare_base-mainline.sh
+          02-prepare_package.sh
+          03-convert_translation.sh
+          04-fix_kmod.sh
+          05-fix-source.sh
+          99_clean_build_cache.sh
+        )
+        for script in "${scripts[@]}"; do
+          curl -fsSLO "$mirror/openwrt/scripts/$script"
+        done
+        if [ -n "$git_password" ] && [ -n "$private_url" ]; then
+          curl -u openwrt:"$git_password" -fsSLO "$private_url"
+        else
+          curl -fsSLO "$mirror/openwrt/scripts/10-custom.sh"
+        fi
+        chmod 0755 ./*.sh
+        bash 00-prepare_base.sh
+        bash 01-prepare_base-mainline.sh
+        bash 02-prepare_package.sh
+        bash 04-fix_kmod.sh
+        bash 05-fix-source.sh
+        [ -f "10-custom.sh" ] && bash 10-custom.sh
+        find feeds -type f -name "*.orig" -exec rm -f {} \;
+        rm -f 0*-*.sh 10-custom.sh
+
+        if [ "$platform" = "x86_64" ]; then
+          curl -fsS "$mirror/openwrt/25-config-musl-x86" > .config
+        elif [ "$platform" = "rk3568" ]; then
+          curl -fsS "$mirror/openwrt/25-config-musl-r5s" > .config
+        else
+          curl -fsS "$mirror/openwrt/25-config-musl-r4s" > .config
+        fi
+        curl -fsS "$mirror/openwrt/25-config-common" >> .config
+        # iStoreOS 24.10 has NanoPi R5S enabled, while the R5C target is present but not registered.
+        [ "$platform" = "rk3568" ] && sed -i '/friendlyarm_nanopi-r5c/d' .config
+
+        echo 'CONFIG_PACKAGE_luci-app-ota=y' >> .config
+        curl -fsS "$mirror/openwrt/generic/config-bpf" >> .config
+        curl -fsS "$mirror/openwrt/generic/config-lto" >> .config
+        echo 'CONFIG_PACKAGE_luci-app-store=y' >> .config
+        echo 'CONFIG_PACKAGE_luci-app-quickstart=y' >> .config
+        echo 'CONFIG_USE_MOLD=y' >> .config
+        echo '# Kernel - CLANG LTO' >> .config
+        echo 'CONFIG_KERNEL_CC="ccache clang"' >> .config
+        echo 'CONFIG_EXTRA_OPTIMIZATION=""' >> .config
+        echo '# CONFIG_PACKAGE_kselftests-bpf is not set' >> .config
+        echo '# Kernel - LRNG' >> .config
+        echo 'CONFIG_KERNEL_LRNG=y' >> .config
+        echo '# CONFIG_PACKAGE_urandom-seed is not set' >> .config
+        echo '# CONFIG_PACKAGE_urngd is not set' >> .config
+        echo '# gcc 16' >> .config
+        echo 'CONFIG_DEVEL=y' >> .config
+        echo 'CONFIG_TOOLCHAINOPTS=y' >> .config
+        echo 'CONFIG_GCC_USE_VERSION_16=y' >> .config
+        echo 'CONFIG_CCACHE=y' >> .config
+        echo 'CONFIG_CCACHE_DIR="/builder/.ccache"' >> .config
+
+        rm -rf tmp/*
+        make defconfig
+        sed -i "/BUILD_DATE/d" package/base-files/files/usr/lib/os-release
+        sed -i "/BUILD_ID/aBUILD_DATE=\"$CURRENT_DATE\"" package/base-files/files/usr/lib/os-release
+        make -j$cores IGNORE_ERRORS="n m"
+
+        if compgen -G "bin/targets/*/*/sha256sums" > /dev/null; then
+          echo -e "\n\e[1;32mBuild success!\e[0m"
+        else
+          echo -e "\n\e[1;31mBuild error...\e[0m"
+          exit 1
+        fi
+
+    - name: Extensive logs after a failed compilation
+      if: steps.compile.outcome == 'failure'
+      working-directory: /builder/openwrt
+      run: |
+        make V=s IGNORE_ERRORS="n m"
+
+    - name: Prepare Firmware Files
+      working-directory: /builder
+      run: |
+        mkdir -p rom info openwrt/ota
+        if [ "${{ matrix.model }}" = "nanopi-r4s" ]; then
+          cp -a openwrt/bin/targets/rockchip/*/*.img.gz rom/
+          cp -a openwrt/bin/targets/rockchip/*/*-r4s.manifest info/manifest.txt
+          cp -a openwrt/bin/targets/rockchip/*/config.buildinfo info/config.buildinfo
+          ota_key="friendlyarm,nanopi-r4s"
+          ota_file=$(ls rom/*-r4s-squashfs-sysupgrade.img.gz | head -1)
+        elif [ "${{ matrix.model }}" = "nanopi-r5s" ]; then
+          cp -a openwrt/bin/targets/rockchip/*/*.img.gz rom/
+          cp -a openwrt/bin/targets/rockchip/*/*.manifest info/manifest.txt
+          cp -a openwrt/bin/targets/rockchip/*/config.buildinfo info/config.buildinfo
+          ota_key="friendlyarm,nanopi-r5s"
+          ota_file=$(ls rom/*-r5s-squashfs-sysupgrade.img.gz | head -1)
+        elif [ "${{ matrix.model }}" = "x86_64" ]; then
+          cp -a openwrt/bin/targets/x86/*/*-ext4-combined-efi.img.gz rom/
+          cp -a openwrt/bin/targets/x86/*/*-squashfs-combined-efi.img.gz rom/
+          cp -a openwrt/bin/targets/x86/*/*-generic-rootfs.tar.gz rom/
+          cp -a openwrt/bin/targets/x86/*/*-generic.manifest info/manifest.txt
+          cp -a openwrt/bin/targets/x86/*/config.buildinfo info/config.buildinfo
+          ota_key="x86_64"
+          ota_file=$(ls rom/*-squashfs-combined-efi.img.gz | head -1)
+        fi
+        cd rom && sha256sum * > ../info/sha256sums.txt && cd ..
+        sha256=$(sha256sum "$ota_file" | awk '{print $1}')
+        ota_url="https://dev.cooluc.com/istoreos/${{ matrix.model }}/$(basename "$ota_file")"
+        cat > openwrt/ota/fw.json <<EOF
+        {
+          "$ota_key": [
+            {
+              "build_date": "$(date +%s)",
+              "sha256sum": "$sha256",
+              "url": "$ota_url"
+            }
+          ]
+        }
+        EOF
+        cp -a info/* rom/
+        tar zcf rom/buildinfo_${{ matrix.model }}.tar.gz info
+        touch rom/.ftp-deploy-sync-state.json
+        echo '## iStoreOS Version' > ${{ env.build_dir }}/bodyFile
+        echo '**This build uses istoreos/istoreos and enables this project’s common feature set: OTA, BPF, LTO, LRNG, Mold, GCC 16, Clang kernel LTO, and iStore packages.**' >> ${{ env.build_dir }}/bodyFile
+
+    - name: Create release
+      uses: ncipollo/release-action@main
+      with:
+        name: iStoreOS-${{ env.istoreos_branch }}
+        allowUpdates: true
+        tag: ${{ env.istoreos_branch }}
+        commit: main
+        replacesArtifacts: true
+        makeLatest: false
+        token: ${{ secrets.GITHUB_TOKEN }}
+        bodyFile: ${{ env.build_dir }}/bodyFile
+        artifacts: |
+          ${{ env.build_dir }}/rom/*
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v6
+      with:
+        name: ${{ matrix.model }}-${{ env.istoreos_branch }}
+        path: ${{ env.build_dir }}/rom/*.*
+
+    - name: Upload Firmware - FTP
+      uses: sbwml/FTP-Deploy-Action@master
+      with:
+        dangerous-clean-slate: true
+        username: openwrt
+        server: ${{ secrets.ftp_address }}
+        password: ${{ secrets.ftp_password }}
+        server-dir: istoreos/${{ matrix.model }}/
+        local-dir: ${{ env.build_dir }}/rom/
+
+    - name: Release OTA
+      uses: sbwml/FTP-Deploy-Action@master
+      with:
+        username: ota
+        server: ${{ secrets.ftp_address }}
+        password: ${{ secrets.ftp_password }}
+        server-dir: istoreos/${{ matrix.model }}/
+        local-dir: ${{ env.build_dir }}/openwrt/ota/
+        dangerous-clean-slate: true

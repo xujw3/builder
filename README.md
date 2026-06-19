@@ -34,6 +34,8 @@
 
 **[Minimal](https://dev.cooluc.com/minimal)：轻量版 - 基于 [OpenWrt](https://github.com/openwrt/openwrt/releases) 最新 Releases 源代码和软件包编译，无内置插件（不推荐） - [Linux 6.18 LTS](https://kernel.org/)**
 
+**iStoreOS：基于 [iStoreOS](https://github.com/istoreos/istoreos) `istoreos-24.10` 分支编译，当前工作流支持 NanoPi R4S / R5S 与 X86_64，并启用本项目常用特性（OTA、BPF、LTO、LRNG、Mold、GCC 16、Clang Kernel LTO、iStore 组件等）。**
+
 ------
 
 ## 默认信息
@@ -279,3 +281,5 @@ hwclock -f /dev/rtc1
 **构建脚本（存档）：** [https://github.com/sbwml/r4s_build_script](https://github.com/sbwml/r4s_build_script)
 
 **构建来源：** [https://github.com/sbwml/builder](https://github.com/sbwml/builder)
+
+**iStoreOS 源码：** [https://github.com/istoreos/istoreos](https://github.com/istoreos/istoreos)
