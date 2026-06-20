@@ -55,7 +55,7 @@ All firmware workflows run on `ubuntu-24.04` with Bash, set the timezone to `Asi
 bash <(curl -sS ${{ secrets.script_url_general }}) <tag-type> <model>
 ```
 
-`build-istoreos.yml` instead clones `istoreos/istoreos` directly and then reuses this project's public prepare scripts/config fragments. Common compile flags include Clang kernel LTO, ccache, BPF, LTO, LRNG, GCC 16, and mold. On compile failure the workflows enter `/builder/openwrt` and run `make V=s IGNORE_ERRORS="n m"` for verbose diagnostics.
+`build-istoreos.yml` instead clones `istoreos/istoreos` directly and then reuses this project's public prepare scripts/config fragments. Common compile flags include Clang kernel LTO, ccache, BPF, LTO, LRNG, GCC 16 for OpenWrt 25.12 workflows, GCC 14 for iStoreOS 24.10, and mold. On compile failure the workflows enter `/builder/openwrt` and run `make V=s IGNORE_ERRORS="n m"` for verbose diagnostics.
 
 ### Release channels
 
@@ -64,7 +64,7 @@ bash <(curl -sS ${{ secrets.script_url_general }}) <tag-type> <model>
 - `build-minimal.yml`: minimal release build. Triggered manually or by `repository_dispatch` type `minimal`. Sets `MINIMAL_BUILD=y`, creates a non-latest `-minimal` release, uploads artifacts to GitHub Actions and FTP under `minimal/<model>/`, publishes OTA files, and triggers the minimal aDrive upload helper for non-ARMv8 models.
 - `build-snapshots.yml`: nightly/manual snapshot build. Triggered by `workflow_dispatch` and scheduled daily at `0 16 * * *` UTC. Uses `type: dev`, `version: openwrt-25.12`, uploads GitHub Actions artifacts, conditionally uploads to Aliyunpan during the configured hour window, then syncs FTP under `snapshot/<model>/`.
 - `openwrt-core.yml`: kernel module/core package build. Triggered manually. Builds a reduced matrix (`armv8`, `nanopi-r5s`, `x86_64`) with `OPENWRT_CORE=y`, publishes `kmod-openwrt-25.12` as a prerelease, dispatches `sbwml/openwrt_core3`, and maintains ccache.
-- `build-istoreos.yml`: iStoreOS build. Triggered manually or by `repository_dispatch` type `istoreos`. Clones `https://github.com/istoreos/istoreos.git` at `istoreos-24.10`, supports `nanopi-r4s`, `nanopi-r5s`, and `x86_64`, reuses this project's public prepare/config fragments, and enables OTA, BPF, LTO, LRNG, Mold, GCC 16, Clang kernel LTO, ccache, and iStore packages.
+- `build-istoreos.yml`: iStoreOS build. Triggered manually or by `repository_dispatch` type `istoreos`. Clones `https://github.com/istoreos/istoreos.git` at `istoreos-24.10`, supports `nanopi-r4s`, `nanopi-r5s`, and `x86_64`, reuses this project's public prepare/config fragments, and enables OTA, BPF, LTO, LRNG, Mold, GCC 14 (highest version available in upstream iStoreOS 24.10), Clang kernel LTO, ccache, and iStore packages.
 
 ### Target/model handling
 

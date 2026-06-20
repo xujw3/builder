@@ -78,7 +78,7 @@ jobs:
         git_password: ${{ secrets.ftp_password }}
         private_url: ${{ secrets.private_url }}
       run: |
-        export KERNEL_CLANG_LTO=y ENABLE_CCACHE=y ENABLE_OTA=y ENABLE_BPF=y ENABLE_LTO=y ENABLE_LRNG=y USE_GCC16=y ENABLE_MOLD=y ENABLE_ISTORE=y
+        export KERNEL_CLANG_LTO=y ENABLE_CCACHE=y ENABLE_OTA=y ENABLE_BPF=y ENABLE_LTO=y ENABLE_LRNG=y USE_GCC14=y ENABLE_MOLD=y ENABLE_ISTORE=y
         export branch="${ISTOREOS_BRANCH}" version=rc2 mirror=https://init.cooluc.com github=github.com gitea=git.cooluc.com code_mirror=github.com
         export CURRENT_DATE=$(date +%s)
         export LAN=${LAN:-10.0.0.1}
@@ -105,14 +105,14 @@ jobs:
 
         echo -e "\n\e[1;32mBuilding iStoreOS ${ISTOREOS_BRANCH}\e[0m"
         echo -e "\e[1;32mModel: $model\e[0m"
-        echo -e "\e[1;32mFeatures: OTA BPF LTO LRNG Mold GCC16 Clang-LTO iStore\e[0m\n"
+        echo -e "\e[1;32mFeatures: OTA BPF LTO LRNG Mold GCC14 Clang-LTO iStore\e[0m\n"
 
         rm -rf openwrt
         git clone --depth=1 "$ISTOREOS_REPO" -b "$ISTOREOS_BRANCH" openwrt
         cd openwrt
         echo "$ISTOREOS_BRANCH" > version.txt
 
-        curl -fsSLO "$mirror/openwrt/patch/key2.tar.gz"
+        curl -fsSL -O "$mirror/openwrt/patch/key2.tar.gz"
         tar zxf key2.tar.gz
         rm -f key2.tar.gz
 
@@ -129,12 +129,12 @@ jobs:
           99_clean_build_cache.sh
         )
         for script in "${scripts[@]}"; do
-          curl -fsSLO "$mirror/openwrt/scripts/$script"
+          curl -fsSL -O "$mirror/openwrt/scripts/$script"
         done
         if [ -n "$git_password" ] && [ -n "$private_url" ]; then
-          curl -u openwrt:"$git_password" -fsSLO "$private_url"
+          curl -u openwrt:"$git_password" -fsSL -O "$private_url"
         else
-          curl -fsSLO "$mirror/openwrt/scripts/10-custom.sh"
+          curl -fsSL -O "$mirror/openwrt/scripts/10-custom.sh"
         fi
         chmod 0755 ./*.sh
         bash 00-prepare_base.sh
@@ -147,19 +147,50 @@ jobs:
         rm -f 0*-*.sh 10-custom.sh
 
         if [ "$platform" = "x86_64" ]; then
-          curl -fsS "$mirror/openwrt/25-config-musl-x86" > .config
+          curl -fsSL "$mirror/openwrt/25-config-musl-x86" > .config
         elif [ "$platform" = "rk3568" ]; then
-          curl -fsS "$mirror/openwrt/25-config-musl-r5s" > .config
+          curl -fsSL "$mirror/openwrt/25-config-musl-r5s" > .config
         else
-          curl -fsS "$mirror/openwrt/25-config-musl-r4s" > .config
+          curl -fsSL "$mirror/openwrt/25-config-musl-r4s" > .config
         fi
-        curl -fsS "$mirror/openwrt/25-config-common" >> .config
+        curl -fsSL "$mirror/openwrt/25-config-common" >> .config
         # iStoreOS 24.10 has NanoPi R5S enabled, while the R5C target is present but not registered.
         [ "$platform" = "rk3568" ] && sed -i '/friendlyarm_nanopi-r5c/d' .config
 
+        # Keep the target explicit after importing shared config fragments, otherwise a bad or missing
+        # config download can fall back to iStoreOS' default MIPS target during failure diagnostics.
+        cat >> .config <<EOF
+        # iStoreOS target override
+        EOF
+        case "$platform" in
+          x86_64)
+            cat >> .config <<EOF
+        CONFIG_TARGET_x86=y
+        CONFIG_TARGET_x86_64=y
+        CONFIG_TARGET_x86_64_DEVICE_generic=y
+        CONFIG_TARGET_KERNEL_PARTSIZE=32
+        CONFIG_TARGET_ROOTFS_PARTSIZE=944
+        EOF
+            ;;
+          rk3399)
+            cat >> .config <<EOF
+        CONFIG_TARGET_rockchip=y
+        CONFIG_TARGET_rockchip_armv8=y
+        CONFIG_TARGET_rockchip_armv8_DEVICE_friendlyarm_nanopi-r4s=y
+        EOF
+            ;;
+          rk3568)
+            cat >> .config <<EOF
+        CONFIG_TARGET_rockchip=y
+        CONFIG_TARGET_rockchip_armv8=y
+        CONFIG_TARGET_rockchip_armv8_DEVICE_friendlyarm_nanopi-r5s=y
+        EOF
+            ;;
+        esac
+
         echo 'CONFIG_PACKAGE_luci-app-ota=y' >> .config
-        curl -fsS "$mirror/openwrt/generic/config-bpf" >> .config
-        curl -fsS "$mirror/openwrt/generic/config-lto" >> .config
+        curl -fsSL "$mirror/openwrt/generic/config-bpf" >> .config
+        curl -fsSL "$mirror/openwrt/generic/config-lto" >> .config
         echo 'CONFIG_PACKAGE_luci-app-store=y' >> .config
         echo 'CONFIG_PACKAGE_luci-app-quickstart=y' >> .config
         echo 'CONFIG_USE_MOLD=y' >> .config
@@ -171,15 +202,25 @@ jobs:
         echo 'CONFIG_KERNEL_LRNG=y' >> .config
         echo '# CONFIG_PACKAGE_urandom-seed is not set' >> .config
         echo '# CONFIG_PACKAGE_urngd is not set' >> .config
-        echo '# gcc 16' >> .config
+        echo '# gcc 14' >> .config
         echo 'CONFIG_DEVEL=y' >> .config
         echo 'CONFIG_TOOLCHAINOPTS=y' >> .config
-        echo 'CONFIG_GCC_USE_VERSION_16=y' >> .config
+        echo 'CONFIG_GCC_USE_VERSION_14=y' >> .config
         echo 'CONFIG_CCACHE=y' >> .config
         echo 'CONFIG_CCACHE_DIR="/builder/.ccache"' >> .config
 
         rm -rf tmp/*
         make defconfig
+        echo "Resolved target/toolchain config:"
+        grep -E '^(CONFIG_TARGET|CONFIG_GCC_USE_VERSION|CONFIG_GCC_VERSION|CONFIG_CPU_TYPE)' .config || true
+        case "$platform" in
+          x86_64)
+            grep -q '^CONFIG_TARGET_x86_64=y' .config || { echo 'x86_64 target was not selected'; exit 1; }
+            ;;
+          rk3399|rk3568)
+            grep -q '^CONFIG_TARGET_rockchip_armv8=y' .config || { echo 'rockchip/armv8 target was not selected'; exit 1; }
+            ;;
+        esac
         sed -i "/BUILD_DATE/d" package/base-files/files/usr/lib/os-release
         sed -i "/BUILD_ID/aBUILD_DATE=\"$CURRENT_DATE\"" package/base-files/files/usr/lib/os-release
         make -j$cores IGNORE_ERRORS="n m"
@@ -195,6 +236,12 @@ jobs:
       if: steps.compile.outcome == 'failure'
       working-directory: /builder/openwrt
       run: |
+        if [ ! -f .config ]; then
+          echo '.config was not generated; skip verbose make to avoid building the upstream default target.'
+          exit 1
+        fi
+        echo "Resolved target/toolchain config before verbose rebuild:"
+        grep -E '^(CONFIG_TARGET|CONFIG_GCC_USE_VERSION|CONFIG_GCC_VERSION|CONFIG_CPU_TYPE)' .config || true
         make V=s IGNORE_ERRORS="n m"
 
     - name: Prepare Firmware Files
@@ -240,7 +287,7 @@ jobs:
         tar zcf rom/buildinfo_${{ matrix.model }}.tar.gz info
         touch rom/.ftp-deploy-sync-state.json
         echo '## iStoreOS Version' > ${{ env.build_dir }}/bodyFile
-        echo '**This build uses istoreos/istoreos and enables this project’s common feature set: OTA, BPF, LTO, LRNG, Mold, GCC 16, Clang kernel LTO, and iStore packages.**' >> ${{ env.build_dir }}/bodyFile
+        echo '**This build uses istoreos/istoreos and enables this project’s common feature set: OTA, BPF, LTO, LRNG, Mold, GCC 14, Clang kernel LTO, and iStore packages.**' >> ${{ env.build_dir }}/bodyFile
 
     - name: Create release
       uses: ncipollo/release-action@main
